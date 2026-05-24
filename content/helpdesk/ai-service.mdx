@@ -1,0 +1,185 @@
+---
+title: AI Service
+description: FastAPI service that runs a LangGraph ReAct agent to classify and assign support tickets.
+---
+
+import MermaidDiagram from "@/components/MermaidDiagram";
+import { TechStack, FileTable, EnvTable, Callout } from "@/components/mdx/components";
+
+# AI Service
+
+The AI Service is the intelligence layer of the Helpdesk system. It receives a support ticket, runs it through an AI pipeline (embedding → RAG → LangGraph agent → decision), and returns a structured JSON telling the backend which technician should handle it, at what priority, and why.
+
+<TechStack items={[
+  { name: "FastAPI",     role: "HTTP framework. Exposes POST /api/v1/tickets/analyze",          color: "emerald" },
+  { name: "LangGraph",   role: "ReAct agent loop — reason, call tools, reason again until done", color: "indigo" },
+  { name: "LangChain",   role: "LLM integration layer and tool wrappers",                        color: "indigo" },
+  { name: "Gemini",      role: "LLM model (gemini-2.0-flash) for reasoning + embeddings",        color: "violet" },
+  { name: "ChromaDB",    role: "Vector store for RAG — stores processed tickets as embeddings",   color: "blue" },
+  { name: "Python 3.11", role: "Runtime. Uses asyncio throughout for non-blocking I/O",          color: "amber" },
+]} />
+
+---
+
+## Pipeline overview
+
+Every ticket goes through 6 stages before a decision is returned:
+
+<MermaidDiagram
+  chart={`flowchart LR
+    A[POST /analyze] --> B[Text cleaning]
+    B --> C[Embedding\nGemini]
+    C --> D[RAG search\nChromaDB]
+    D --> E[LangGraph\nReAct agent]
+    E --> F[get_routing_context tool\nBackend API]
+    F --> E
+    E --> G[JSON decision]
+    G --> H[Store in\nChromaDB]`}
+  caption="Full pipeline: from HTTP request to structured decision"
+/>
+
+### Stage 1 — Text cleaning
+File: `app/utils/text_cleaner.py`
+
+The raw ticket text is normalized before embedding:
+- Unicode normalization (NFKC)
+- Control characters stripped
+- Truncated to 4,000 characters to stay within model limits
+
+### Stage 2 — Embedding
+Using `models/text-embedding-004` from Google Generative AI. The cleaned text is converted to a vector that captures semantic meaning. This vector is used for RAG search.
+
+### Stage 3 — RAG (Retrieval-Augmented Generation)
+ChromaDB is queried for the 3 most similar historical tickets (cosine similarity threshold: 0.75). If similar resolved tickets are found, their resolution summaries are injected into the agent's context. This helps the agent make better decisions based on past experience.
+
+### Stage 4 — LangGraph ReAct agent
+
+This is the core of the service. A ReAct (Reason + Act) agent loop:
+
+<MermaidDiagram
+  chart={`sequenceDiagram
+    participant A as Agent
+    participant T as get_routing_context tool
+    participant B as Backend API
+
+    A->>A: Read ticket + RAG context
+    A->>T: Call tool (reason: need technicians)
+    T->>B: GET /api/internal/routing-context?org_id=xxx
+    B-->>T: { org_context, niveles, tecnicos }
+    T-->>A: Routing context returned
+    A->>A: Reason: match skills, evaluate priority
+    A->>A: Output JSON decision`}
+  caption="LangGraph ReAct loop: the agent calls the routing tool once, then produces the final JSON"
+/>
+
+### Stage 5 — Routing context tool
+
+The tool calls the backend's internal endpoint with the `org_id` of the ticket. It returns:
+
+```json
+{
+  "org_context": {
+    "company_type": "it_services",
+    "ai_custom_instructions": "ABAP dumps in production = priority 10..."
+  },
+  "niveles": [
+    { "numero_nivel": 1, "max_complexity_score": 4, "tags": ["consulta_uso", "authorization"] },
+    { "numero_nivel": 2, "max_complexity_score": 8, "tags": ["abap", "performance"] }
+  ],
+  "tecnicos": [
+    { "id": "uuid", "nombre": "Ana R.", "skills": ["abap", "sap_basis"], "carga_actual": 2, "nivel": { "numero": 2 } }
+  ]
+}
+```
+
+<Callout type="info">
+  **Multi-tenancy**: The `org_id` is passed via a Python `ContextVar` — not as a tool argument. This keeps the LangGraph tool signature simple while still filtering all data per organization. The `ContextVar` is set in `run_agent()` before invoking the agent and reset in the `finally` block.
+</Callout>
+
+### Stage 6 — Prompt construction
+
+The system prompt is built dynamically based on `org_context`:
+
+```python
+# app/agent/prompts.py
+def build_system_prompt(company_type, custom_instructions):
+    prompt = BASE_SYSTEM_PROMPT
+    if company_type and COMPANY_TYPE_CONTEXTS.get(company_type):
+        prompt += f"\n\n## Company Profile\n{COMPANY_TYPE_CONTEXTS[company_type]}"
+    if custom_instructions:
+        prompt += f"\n\n## Client Instructions (max priority)\n{custom_instructions}"
+    return prompt
+```
+
+`COMPANY_TYPE_CONTEXTS` has pre-written sector profiles for: `tech_saas`, `ecommerce`, `healthcare`, `retail`, `it_services`. The `ai_custom_instructions` from the org always override everything else.
+
+---
+
+## Decision output
+
+The agent must return a strict JSON (no markdown, no extra text):
+
+```json
+{
+  "ticket_id": "uuid",
+  "category": "abap_dump",
+  "priority": 9,
+  "complexity_score": 8,
+  "suggested_level": 2,
+  "assigned_tecnico_id": "uuid-or-null",
+  "reasoning": "Production ABAP dump in VL02N. Highest priority per client rules. Ana R. selected: abap skill match, level 2 clearance, lowest load (2 active tickets vs 5 for next candidate).",
+  "similar_tickets": [
+    { "ticket_id": "uuid", "similarity_score": 0.89, "resolution_summary": "..." }
+  ]
+}
+```
+
+<Callout type="warn">
+  If the LLM returns the JSON wrapped in markdown code fences, `_extract_json()` in `app/agent/agent.py` strips them with a regex. This handles model inconsistency gracefully.
+</Callout>
+
+---
+
+## Key files
+
+<FileTable files={[
+  { path: "app/main.py",                          description: "FastAPI app factory, CORS config, router registration" },
+  { path: "app/api/v1/endpoints/tickets.py",       description: "POST /analyze endpoint — entry point for every ticket" },
+  { path: "app/agent/agent.py",                    description: "run_agent() — sets ContextVar, invokes LangGraph, extracts JSON" },
+  { path: "app/agent/tools.py",                    description: "get_routing_context_tool — LangChain tool that calls the backend, reads ContextVar" },
+  { path: "app/agent/prompts.py",                  description: "SYSTEM_PROMPT + COMPANY_TYPE_CONTEXTS + build_user_prompt()" },
+  { path: "app/clients/backend_client.py",         description: "HTTP client that calls /api/internal/routing-context with X-Internal-Secret header" },
+  { path: "app/rag/chroma_store.py",               description: "ChromaDB wrapper: search() and store() for ticket vectors" },
+  { path: "app/schemas/ticket_input.py",           description: "Pydantic schema for the incoming request (includes org_id)" },
+  { path: "app/schemas/ai_decision.py",            description: "Pydantic schema for the outgoing decision JSON" },
+  { path: "app/core/config.py",                    description: "Settings via pydantic-settings — reads .env file" },
+]} />
+
+---
+
+## Environment variables
+
+<EnvTable vars={[
+  { name: "GEMINI_API_KEY",       description: "Google AI API key for Gemini model and embeddings",          example: "AIzaSy..." },
+  { name: "INTERNAL_API_SECRET",  description: "Shared secret header for backend ↔ AI service calls",       example: "helpdesk_internal_secret_dev_256bit" },
+  { name: "BACKEND_URL",          description: "Base URL of the NestJS backend",                             example: "http://localhost:3001" },
+]} />
+
+---
+
+## How to run locally
+
+```bash
+cd helpdesk-ai-service
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env   # fill in GEMINI_API_KEY
+uvicorn app.main:app --reload --port 8000
+```
+
+The service starts at `http://localhost:8000`. Swagger docs available at `/docs`.
+
+<Callout type="tip">
+  ChromaDB persists its vector store to `./chroma_data/` by default. If you reset the database and want a clean RAG state, delete this folder before restarting the service.
+</Callout>

@@ -1,0 +1,242 @@
+---
+title: Frontend
+description: Next.js 15 dashboard — three role-based portals (client, technician, admin) with React Query, WebSockets, and JWT auth.
+---
+
+import MermaidDiagram from "@/components/MermaidDiagram";
+import { TechStack, FileTable, EnvTable, Callout } from "@/components/mdx/components";
+
+# Frontend
+
+The Frontend is a Next.js 15 App Router application that renders three distinct experiences depending on the authenticated user's role: **clients** submit and track tickets, **technicians** manage their queue, and **admins** configure the system and view metrics. All three share a single codebase with route-based separation.
+
+<TechStack items={[
+  { name: "Next.js 15",      role: "App Router — layouts, server/client components, route groups",  color: "zinc" },
+  { name: "React 19",        role: "UI runtime",                                                     color: "blue" },
+  { name: "TanStack Query",  role: "Server state — useQuery, useMutation, cache invalidation",      color: "red" },
+  { name: "Socket.IO client","role": "Real-time ticket updates via WebSocket",                       color: "emerald" },
+  { name: "Tailwind CSS 4",  role: "Utility-first styling",                                         color: "cyan" },
+  { name: "Axios",           role: "HTTP client with JWT interceptor and 401 redirect",             color: "violet" },
+  { name: "TypeScript",      role: "Strict types throughout — shared types with backend contracts", color: "blue" },
+]} />
+
+---
+
+## Route structure
+
+The App Router uses route groups to apply shared layouts without affecting URLs.
+
+```
+app/
+├── (auth)/
+│   ├── login/page.tsx          → /login
+│   └── register/page.tsx       → /register?token=...
+│
+└── (dashboard)/
+    ├── layout.tsx              → Sidebar + Header (requires auth)
+    ├── client/
+    │   ├── my-tickets/page.tsx → /client/my-tickets
+    │   └── new-ticket/page.tsx → /client/new-ticket
+    ├── technician/
+    │   └── page.tsx            → /technician
+    └── admin/
+        ├── tickets/page.tsx    → /admin/tickets
+        ├── technicians/page.tsx→ /admin/technicians
+        ├── levels/page.tsx     → /admin/levels
+        ├── users/page.tsx      → /admin/users (invitations + registered clients)
+        └── metrics/page.tsx    → /admin/metrics
+```
+
+After login, the `AuthContext` reads the user's role and redirects immediately:
+
+```typescript
+function redirectByRole(role: string) {
+  if (role === "user")      window.location.href = "/client/my-tickets";
+  else if (role === "admin") window.location.href = "/admin/tickets";
+  else                       window.location.href = "/technician";
+}
+```
+
+---
+
+## Auth architecture
+
+Auth is **client-side only** — no server-side session cookies. The JWT is stored in `localStorage` and injected by an Axios interceptor on every request.
+
+<MermaidDiagram
+  chart={`sequenceDiagram
+    participant User
+    participant AuthCtx as AuthContext
+    participant API as apiClient (Axios)
+    participant Backend
+
+    User->>AuthCtx: login({ email, password })
+    AuthCtx->>API: POST /auth/login
+    API->>Backend: { email, password }
+    Backend-->>API: { access_token, user }
+    API-->>AuthCtx: response
+    AuthCtx->>AuthCtx: localStorage.set(access_token, auth_user)
+    AuthCtx->>User: redirectByRole(user.role)
+
+    Note over API: On every subsequent request:
+    API->>API: interceptors.request → inject Bearer token
+    API->>Backend: GET /tickets/admin/metrics
+    Backend-->>API: 401 (token expired)
+    API->>API: interceptors.response → clear localStorage
+    API->>User: window.location.href = "/login"`}
+  caption="Auth flow — JWT stored in localStorage, global 401 handler redirects to login"
+/>
+
+<Callout type="warn">
+  localStorage is not accessible in SSR. All auth-related code checks `typeof window !== 'undefined'` before reading. The `AuthProvider` initializes state with a lazy initializer that handles this guard.
+</Callout>
+
+---
+
+## Data fetching — React Query hooks
+
+All server state lives in React Query. Each domain has a dedicated hook file under `src/hooks/`. The hooks use `apiClient` (Axios instance with JWT interceptor).
+
+```typescript
+// hooks/useTickets.ts — example pattern
+export function useMyTickets() {
+  return useQuery({
+    queryKey: ["my-tickets"],
+    queryFn: () => apiClient.get<Ticket[]>("/tickets/my").then(r => r.data),
+  });
+}
+
+export function useCreateTicket() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (dto: CreateTicketDto) =>
+      apiClient.post<{ ticket_id: string; status: string }>("/tickets", dto).then(r => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["my-tickets"] }),
+  });
+}
+```
+
+| Hook | Query key | Refetch |
+|---|---|---|
+| `useMyTickets` | `["my-tickets"]` | On mutation |
+| `useAdminTickets` | `["admin-tickets"]` | On mutation |
+| `useTechnicianTickets` | `["tech-tickets"]` | WebSocket push |
+| `useAdminMetrics` | `["admin-metrics"]` | 60s interval |
+| `useAdminUsers` | `["admin-users"]` | On invite sent |
+| `useInvitations` | `["invitations"]` | On resend |
+| `useLevels` | `["levels"]` | On create/update |
+| `useTechnicians` | `["technicians"]` | On create/update |
+
+---
+
+## WebSocket integration
+
+The WebSocket client is a singleton `Socket.IO` connection to `ws://host/tickets`. It joins a personal room on connect by passing query params in the handshake.
+
+```typescript
+// lib/websocket-client.ts
+export function getSocket(options: SocketOptions = {}): Socket {
+  if (socket?.connected) return socket;
+  socket = io(`${url}/tickets`, {
+    query: { technicianId, userId },  // room assignment happens server-side
+    transports: ["websocket"],
+    reconnectionAttempts: 5,
+    reconnectionDelay: 2000,
+  });
+  return socket;
+}
+```
+
+The `useWebSocket` hook wraps this in a React `useEffect` with cleanup:
+
+```typescript
+// hooks/useWebSocket.ts
+export function useWebSocket<E extends WSEvent>(
+  event: E,
+  handler: (payload: WSEventMap[E]) => void,
+  options: WebSocketOptions
+): void {
+  useEffect(() => {
+    const socket = getSocket(options);
+    socket.on(event, handler);
+    return () => socket.off(event, handler);
+  }, [event, options.technicianId, options.userId]);
+}
+```
+
+**Event types** (`types/websocket-events.ts`):
+
+| Event | Received by | Payload |
+|---|---|---|
+| `ticket:assigned_to_you` | Technician | Full ticket update |
+| `ticket:status_changed` | Client (ticket creator) | Status + reasoning |
+
+When a `ticket:status_changed` arrives, the client screen shows a `TicketProcessingAlert` with the AI's reasoning and assigned technician name — no page refresh needed.
+
+---
+
+## Admin metrics screen
+
+`AdminMetricsScreen` fetches `GET /tickets/admin/metrics` every 60 seconds and renders 4 summary cards + visualizations.
+
+```typescript
+// hooks/useAdminMetrics.ts
+export function useAdminMetrics() {
+  return useQuery({
+    queryKey: ["admin-metrics"],
+    queryFn: () => apiClient.get<AdminMetrics>("/tickets/admin/metrics").then(r => r.data),
+    refetchInterval: 60_000,
+  });
+}
+```
+
+The technician load table uses a semaphore badge system:
+- **Green** — `carga_actual` 0–2 (available)
+- **Yellow** — 3–5 (moderate)
+- **Red** — 6+ (overloaded)
+
+---
+
+## Key files
+
+<FileTable files={[
+  { path: "src/app/(dashboard)/layout.tsx",            description: "Dashboard shell — Sidebar + Header, reads AuthContext to check auth" },
+  { path: "src/context/AuthContext.tsx",               description: "login(), register(), logout() — JWT storage + role-based redirect" },
+  { path: "src/lib/api-client.ts",                     description: "Axios instance — baseURL, JWT interceptor, global 401 handler" },
+  { path: "src/lib/websocket-client.ts",               description: "Singleton Socket.IO client — connects to /tickets namespace" },
+  { path: "src/hooks/useWebSocket.ts",                 description: "Generic typed hook — subscribe to any WSEventMap event with cleanup" },
+  { path: "src/hooks/useTickets.ts",                   description: "useMyTickets, useAdminTickets, useCreateTicket, useMarkResolved" },
+  { path: "src/hooks/useAdminMetrics.ts",              description: "Polls GET /tickets/admin/metrics every 60s" },
+  { path: "src/hooks/useInvitations.ts",               description: "useInvitations, useSendInvitation, useResendInvitation" },
+  { path: "src/screens/AdminMetricsScreen.tsx",        description: "4 KPI cards + status breakdown + technician load table" },
+  { path: "src/screens/AdminUsersScreen.tsx",          description: "Two tables: pending invitations (with Reenviar) + registered clients" },
+  { path: "src/screens/TechnicianDashboardScreen.tsx", description: "Technician queue — subscribes to ticket:assigned_to_you WebSocket event" },
+  { path: "src/types/websocket-events.ts",             description: "WSEventMap type — maps event names to payload shapes" },
+  { path: "src/components/layout/Sidebar.tsx",         description: "Role-aware nav — different links for user / technician / admin" },
+]} />
+
+---
+
+## Environment variables
+
+<EnvTable vars={[
+  { name: "NEXT_PUBLIC_API_URL",  description: "Backend REST base URL — injected into apiClient",      example: "http://localhost:3001/api" },
+  { name: "NEXT_PUBLIC_WS_URL",   description: "Backend WebSocket base URL — injected into getSocket", example: "http://localhost:3001" },
+]} />
+
+---
+
+## How to run locally
+
+```bash
+cd helpdesk-front
+npm install
+cp .env.local.example .env.local   # set NEXT_PUBLIC_API_URL and NEXT_PUBLIC_WS_URL
+npm run dev
+```
+
+The app starts at `http://localhost:3000`. The backend must be running on port 3001 for API calls and WebSocket to work.
+
+<Callout type="tip">
+  To test the full real-time flow locally: open two browser windows — one logged in as a client, one as the assigned technician. Submit a ticket in the client window and watch both windows update within seconds.
+</Callout>
