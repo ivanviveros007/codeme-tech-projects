@@ -1,0 +1,155 @@
+---
+title: Landing Page
+description: Sitio de marketing Next.js 16 — diseño oscuro, i18n (en/es), arquitectura por secciones, formulario beta con Resend.
+---
+
+import { TechStack, FileTable, EnvTable, Callout } from "@/components/mdx/components";
+
+# Landing Page
+
+La Landing Page es el sitio de marketing público del Helpdesk. Comunica la propuesta de valor del producto — routing de tickets potenciado por IA, basado en skills — a potenciales clientes. Soporta inglés y español vía `next-intl`, usa un diseño oscuro zinc-950 y termina con un formulario de beta signup respaldado por una llamada a la API de Resend.
+
+<TechStack items={[
+  { name: "Next.js 16",   role: "App Router, server components, routing i18n vía next-intl",       color: "zinc" },
+  { name: "next-intl",    role: "Internacionalización — routing por locale, hook useTranslations",  color: "blue" },
+  { name: "Tailwind 4",   role: "Estilos utility-first — paleta oscura zinc, acentos indigo",      color: "cyan" },
+  { name: "Resend",       role: "Formulario beta — envía email de notificación al dueño",           color: "violet" },
+  { name: "TypeScript",   role: "Runtime",                                                          color: "blue" },
+]} />
+
+---
+
+## Arquitectura de secciones
+
+La página se divide en 8 secciones, cada una un server component independiente bajo `components/sections/`. La página raíz en `app/[locale]/page.tsx` las compone en orden.
+
+```
+Landing
+├── Navbar              — header oscuro, logo, botón CTA, selector de idioma
+├── Hero                — fondo dot-grid, headline, mockup de browser con stats en vivo
+├── Problem             — paneles antes/después mostrando routing manual vs IA
+├── HowItWorks          — proceso en 3 pasos con caja de output de IA en monospace
+├── Features            — 4 tarjetas oscuras numeradas con snippets de ejemplo
+├── ForWho              — 3 tarjetas por industria (SaaS, IT services, e-commerce)
+├── BetaForm            — input de email → API Resend → confirmación
+└── Footer              — minimal de 3 columnas horizontal
+```
+
+---
+
+## Internacionalización
+
+`next-intl` maneja el routing a nivel del segmento de locale. Todo el copy vive en `messages/en.ts` y `messages/es.ts`. Los componentes usan `useTranslations()` y referencian claves tipadas — una clave faltante genera un error de TypeScript.
+
+```typescript
+// components/sections/Hero.tsx
+const t = useTranslations("hero");
+
+<h1>{t("headline")} <span className="text-indigo-400">{t("headlineAccent")}</span></h1>
+```
+
+**Estructura de mensajes** (abreviada):
+
+```typescript
+// messages/en.ts (y es.ts con la misma estructura en español)
+export default {
+  nav:        { brand, links, cta },
+  hero:       { eyebrow, headline, headlineAccent, sub, cta, mockStats[], mockTickets[], mockReasoning },
+  problem:    { eyebrow, headline, sub, before: { label, steps[] }, after: { label, steps[] }, stat, statLabel },
+  howItWorks: { eyebrow, headline, steps[], aiExample: { label, fields[], reasoning } },
+  features:   { eyebrow, headline, items[{ number, title, description, example }] },
+  forWho:     { eyebrow, headline, items[{ industry, scenario, value, example }] },
+  betaForm:   { eyebrow, headline, sub, placeholder, cta, benefits[], successTitle, successSub },
+}
+```
+
+---
+
+## Sistema de diseño
+
+El sitio usa una paleta oscura consistente:
+
+| Token | Valor | Uso |
+|---|---|---|
+| Fondo | `zinc-950` | Secciones Hero, Features, BetaForm |
+| Superficie | `zinc-900` | Tarjetas, paneles de mockup |
+| Borde | `zinc-800` | Separadores, bordes de tarjetas |
+| Texto principal | `white` | Headlines |
+| Texto secundario | `zinc-400` | Cuerpo de texto, labels |
+| Acento | `indigo-500` / `indigo-400` | Gradiente de headline, CTAs, íconos |
+| Éxito | `emerald-500` | Acentos del panel "después" |
+| Peligro | `red-500` | Acentos del panel "antes" |
+
+Las secciones Problem y ForWho usan **fondo blanco** para crear ritmo visual — alternando oscuro/claro/oscuro/claro/oscuro al hacer scroll.
+
+---
+
+## Mockup del Hero
+
+La sección Hero renderiza una ventana de browser falsa (zinc-900 oscuro con tres puntos) que muestra un dashboard de soporte: dos tarjetas de stats (`ticketsHoy`, `tiempoPromedio`), una lista de 3 tickets mock con badges de prioridad e indicadores "hot", y una caja de razonamiento IA en monospace.
+
+Todos los datos mock vienen de las traducciones — nada está hardcodeado en el componente:
+
+```typescript
+// messages/es.ts — datos mock del hero
+mockTickets: [
+  { id: "TK-4821", subject: "Transacción VL02N colgada en producción", priority: "P1", status: "Analizando...", hot: true },
+  { id: "TK-4820", subject: "Usuario sin acceso a SAP GUI tras reseteo", priority: "P2", status: "Asignado", hot: false },
+  { id: "TK-4819", subject: "Reporte lento en MB52", priority: "P3", status: "Asignado", hot: false },
+],
+mockReasoning: "→ Asignando Ana R. (SAP Basis, N2) · Prioridad 9 · Impacto crítico en producción"
+```
+
+---
+
+## Formulario beta
+
+El formulario envía a `POST /api/beta-signup`, un route handler de Next.js que usa el SDK de Resend para enviar un email de notificación al dueño.
+
+Al confirmar, el formulario se reemplaza con un mensaje de éxito usando estado local de React — sin navegación de página.
+
+---
+
+## Archivos clave
+
+<FileTable files={[
+  { path: "app/[locale]/page.tsx",              description: "Página raíz — compone las 8 secciones en orden" },
+  { path: "app/[locale]/layout.tsx",            description: "Layout de locale — wrapper de NextIntlClientProvider" },
+  { path: "middleware.ts",                      description: "Middleware de next-intl — detección de locale y routing" },
+  { path: "messages/en.ts",                     description: "Copy completo en inglés — todas las secciones, datos mock y strings del formulario" },
+  { path: "messages/es.ts",                     description: "Traducción completa al español con la misma estructura que en.ts" },
+  { path: "components/Navbar.tsx",              description: "Header oscuro con logo, links de nav, selector de idioma, botón CTA" },
+  { path: "components/sections/Hero.tsx",       description: "Fondo dot-grid + mockup de browser con tickets mock animados" },
+  { path: "components/sections/Problem.tsx",    description: "Paneles antes/después de dos columnas con pasos numerados y stat grande" },
+  { path: "components/sections/HowItWorks.tsx", description: "Explicación en 3 pasos — paso 2 ocupa ancho completo con caja de output IA" },
+  { path: "components/sections/Features.tsx",   description: "4 tarjetas oscuras numeradas con snippets de ejemplo" },
+  { path: "components/sections/ForWho.tsx",     description: "3 tarjetas de industria — industria+escenario izquierda, valor+ejemplo derecha" },
+  { path: "components/sections/BetaForm.tsx",   description: "Input de email → POST /api/beta-signup → estado de confirmación" },
+  { path: "app/api/beta-signup/route.ts",       description: "Route handler — envía email de notificación vía Resend" },
+]} />
+
+---
+
+## Variables de entorno
+
+<EnvTable vars={[
+  { name: "RESEND_API_KEY", description: "API key de Resend para los emails de notificación del beta signup", example: "re_..." },
+  { name: "OWNER_EMAIL",    description: "Email que recibe las notificaciones de beta signup",                example: "ivan@example.com" },
+]} />
+
+---
+
+## Cómo ejecutar localmente
+
+```bash
+cd helpdesk-landing
+npm install
+cp .env.local.example .env.local   # opcional — el formulario beta funciona sin Resend en dev
+npm run dev
+```
+
+El sitio arranca en `http://localhost:3000`. Navegá a `/es` para la versión en español. El formulario beta logueará en consola si `RESEND_API_KEY` no está configurado.
+
+<Callout type="tip">
+  Para agregar un nuevo idioma: creá `messages/[locale].ts` con la misma estructura que en.ts, agregá el locale a la config de next-intl, y el middleware manejará el routing automáticamente.
+</Callout>

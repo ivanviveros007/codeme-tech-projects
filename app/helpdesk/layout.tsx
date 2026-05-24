@@ -1,5 +1,7 @@
 import Link from "next/link";
 import { auth } from "@/auth";
+import { cookies } from "next/headers";
+import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 
 const services = [
   { slug: "ai-service", label: "AI Service", sub: "FastAPI · LangGraph · Gemini" },
@@ -10,20 +12,26 @@ const services = [
 
 export default async function HelpdeskLayout({ children }: { children: React.ReactNode }) {
   await auth();
+  const cookieStore = await cookies();
+  const lang = cookieStore.get("lang")?.value ?? "en";
+
   return (
     <div className="min-h-screen bg-zinc-950">
       {/* Top bar */}
       <header className="sticky top-0 z-10 border-b border-zinc-800 bg-zinc-950/90 backdrop-blur-md">
-        <div className="mx-auto flex max-w-7xl items-center gap-3 px-6 py-3.5">
-          <Link href="/" className="text-zinc-500 transition hover:text-zinc-300">
-            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
-            </svg>
-          </Link>
-          <span className="text-xs text-zinc-600">/</span>
-          <Link href="/" className="text-xs text-zinc-500 hover:text-zinc-300 transition">Projects</Link>
-          <span className="text-xs text-zinc-600">/</span>
-          <span className="text-xs font-medium text-zinc-300">Helpdesk AI</span>
+        <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-3.5">
+          <div className="flex items-center gap-3">
+            <Link href="/" className="text-zinc-500 transition hover:text-zinc-300">
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
+              </svg>
+            </Link>
+            <span className="text-xs text-zinc-600">/</span>
+            <Link href="/" className="text-xs text-zinc-500 hover:text-zinc-300 transition">Projects</Link>
+            <span className="text-xs text-zinc-600">/</span>
+            <span className="text-xs font-medium text-zinc-300">Helpdesk AI</span>
+          </div>
+          <LanguageSwitcher currentLang={lang} />
         </div>
       </header>
 

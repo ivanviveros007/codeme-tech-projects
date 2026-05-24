@@ -1,6 +1,9 @@
 import { getMdxContent } from "@/lib/mdx";
+import { cookies } from "next/headers";
 
 export default async function LandingPage() {
-  const { content } = await getMdxContent("helpdesk/landing.mdx");
+  const cookieStore = await cookies();
+  const lang = cookieStore.get("lang")?.value ?? "en";
+  const { content } = await getMdxContent("helpdesk/landing.mdx", lang);
   return <article className="max-w-3xl">{content}</article>;
 }

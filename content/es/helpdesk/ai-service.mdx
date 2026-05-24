@@ -1,0 +1,185 @@
+---
+title: Servicio de IA
+description: Servicio FastAPI que ejecuta un agente ReAct de LangGraph para clasificar y asignar tickets de soporte.
+---
+
+import MermaidDiagram from "@/components/MermaidDiagram";
+import { TechStack, FileTable, EnvTable, Callout } from "@/components/mdx/components";
+
+# Servicio de IA
+
+El Servicio de IA es la capa de inteligencia del sistema Helpdesk. Recibe un ticket de soporte, lo procesa a través de un pipeline de IA (embedding → RAG → agente LangGraph → decisión) y devuelve un JSON estructurado indicando qué técnico debe atenderlo, con qué prioridad y el razonamiento.
+
+<TechStack items={[
+  { name: "FastAPI",     role: "Framework HTTP. Expone POST /api/v1/tickets/analyze",              color: "emerald" },
+  { name: "LangGraph",   role: "Loop del agente ReAct — razonar, llamar herramientas, razonar",    color: "indigo" },
+  { name: "LangChain",   role: "Capa de integración con el LLM y wrappers de herramientas",        color: "indigo" },
+  { name: "Gemini",      role: "Modelo LLM (gemini-2.0-flash) para razonamiento y embeddings",     color: "violet" },
+  { name: "ChromaDB",    role: "Vector store para RAG — almacena tickets procesados como vectores", color: "blue" },
+  { name: "Python 3.11", role: "Runtime. Usa asyncio para I/O no bloqueante",                     color: "amber" },
+]} />
+
+---
+
+## Visión general del pipeline
+
+Cada ticket pasa por 6 etapas antes de devolver una decisión:
+
+<MermaidDiagram
+  chart={`flowchart LR
+    A[POST /analyze] --> B[Limpieza\nde texto]
+    B --> C[Embedding\nGemini]
+    C --> D[Búsqueda RAG\nChromaDB]
+    D --> E[Agente LangGraph\nReAct]
+    E --> F[herramienta get_routing_context\nBackend API]
+    F --> E
+    E --> G[Decisión JSON]
+    G --> H[Guardar en\nChromaDB]`}
+  caption="Pipeline completo: desde la petición HTTP hasta la decisión estructurada"
+/>
+
+### Etapa 1 — Limpieza de texto
+Archivo: `app/utils/text_cleaner.py`
+
+El texto crudo del ticket se normaliza antes del embedding:
+- Normalización Unicode (NFKC)
+- Eliminación de caracteres de control
+- Truncado a 4.000 caracteres para respetar los límites del modelo
+
+### Etapa 2 — Embedding
+Usando `models/text-embedding-004` de Google Generative AI. El texto limpio se convierte en un vector que captura el significado semántico. Este vector se usa para la búsqueda RAG.
+
+### Etapa 3 — RAG (Generación Aumentada por Recuperación)
+ChromaDB devuelve los 3 tickets históricos más similares (umbral de similitud coseno: 0.75). Si se encuentran tickets resueltos similares, sus resúmenes de resolución se inyectan en el contexto del agente para mejorar las decisiones.
+
+### Etapa 4 — Agente ReAct de LangGraph
+
+El corazón del servicio. Un loop ReAct (Razonar + Actuar):
+
+<MermaidDiagram
+  chart={`sequenceDiagram
+    participant A as Agente
+    participant T as herramienta get_routing_context
+    participant B as Backend API
+
+    A->>A: Leer ticket + contexto RAG
+    A->>T: Llamar herramienta (necesito técnicos)
+    T->>B: GET /api/internal/routing-context?org_id=xxx
+    B-->>T: { org_context, niveles, tecnicos }
+    T-->>A: Contexto de routing devuelto
+    A->>A: Razonar: hacer match de skills, evaluar prioridad
+    A->>A: Emitir decisión JSON`}
+  caption="Loop ReAct de LangGraph: el agente llama la herramienta una vez y produce el JSON final"
+/>
+
+### Etapa 5 — Herramienta de contexto de routing
+
+La herramienta llama al endpoint interno del backend con el `org_id` del ticket y recibe:
+
+```json
+{
+  "org_context": {
+    "company_type": "it_services",
+    "ai_custom_instructions": "Dumps ABAP en producción = prioridad 10..."
+  },
+  "niveles": [
+    { "numero_nivel": 1, "max_complexity_score": 4, "tags": ["consulta_uso", "authorization"] },
+    { "numero_nivel": 2, "max_complexity_score": 8, "tags": ["abap", "performance"] }
+  ],
+  "tecnicos": [
+    { "id": "uuid", "nombre": "Ana R.", "skills": ["abap", "sap_basis"], "carga_actual": 2, "nivel": { "numero": 2 } }
+  ]
+}
+```
+
+<Callout type="info">
+  **Multi-tenancy**: El `org_id` se pasa mediante un `ContextVar` de Python — no como argumento de la herramienta. Esto mantiene la firma de la herramienta LangGraph simple mientras filtra todos los datos por organización. El `ContextVar` se establece en `run_agent()` antes de invocar el agente y se resetea en el bloque `finally`.
+</Callout>
+
+### Etapa 6 — Construcción del prompt
+
+El system prompt se construye dinámicamente en base al `org_context`:
+
+```python
+# app/agent/prompts.py
+def build_system_prompt(company_type, custom_instructions):
+    prompt = BASE_SYSTEM_PROMPT
+    if company_type and COMPANY_TYPE_CONTEXTS.get(company_type):
+        prompt += f"\n\n## Perfil de Empresa\n{COMPANY_TYPE_CONTEXTS[company_type]}"
+    if custom_instructions:
+        prompt += f"\n\n## Instrucciones del cliente (máxima prioridad)\n{custom_instructions}"
+    return prompt
+```
+
+`COMPANY_TYPE_CONTEXTS` tiene perfiles sectoriales pre-escritos para: `tech_saas`, `ecommerce`, `healthcare`, `retail`, `it_services`. Las `ai_custom_instructions` de la org siempre sobreescriben todo lo demás.
+
+---
+
+## Decisión de salida
+
+El agente debe devolver un JSON estricto (sin markdown, sin texto extra):
+
+```json
+{
+  "ticket_id": "uuid",
+  "category": "abap_dump",
+  "priority": 9,
+  "complexity_score": 8,
+  "suggested_level": 2,
+  "assigned_tecnico_id": "uuid-or-null",
+  "reasoning": "Dump ABAP en producción en VL02N. Máxima prioridad según reglas del cliente. Ana R. seleccionada: match de skill abap, nivel 2, menor carga (2 tickets activos vs 5 del siguiente candidato).",
+  "similar_tickets": [
+    { "ticket_id": "uuid", "similarity_score": 0.89, "resolution_summary": "..." }
+  ]
+}
+```
+
+<Callout type="warn">
+  Si el LLM devuelve el JSON envuelto en backticks de markdown, `_extract_json()` en `app/agent/agent.py` los elimina con una regex. Esto maneja la inconsistencia del modelo de forma robusta.
+</Callout>
+
+---
+
+## Archivos clave
+
+<FileTable files={[
+  { path: "app/main.py",                          description: "Factory de FastAPI, configuración CORS, registro de rutas" },
+  { path: "app/api/v1/endpoints/tickets.py",       description: "Endpoint POST /analyze — punto de entrada de cada ticket" },
+  { path: "app/agent/agent.py",                    description: "run_agent() — establece ContextVar, invoca LangGraph, extrae JSON" },
+  { path: "app/agent/tools.py",                    description: "get_routing_context_tool — herramienta LangChain que llama al backend, lee ContextVar" },
+  { path: "app/agent/prompts.py",                  description: "SYSTEM_PROMPT + COMPANY_TYPE_CONTEXTS + build_user_prompt()" },
+  { path: "app/clients/backend_client.py",         description: "Cliente HTTP que llama /api/internal/routing-context con header X-Internal-Secret" },
+  { path: "app/rag/chroma_store.py",               description: "Wrapper de ChromaDB: search() y store() para vectores de tickets" },
+  { path: "app/schemas/ticket_input.py",           description: "Schema Pydantic para la request entrante (incluye org_id)" },
+  { path: "app/schemas/ai_decision.py",            description: "Schema Pydantic para el JSON de decisión saliente" },
+  { path: "app/core/config.py",                    description: "Settings via pydantic-settings — lee el archivo .env" },
+]} />
+
+---
+
+## Variables de entorno
+
+<EnvTable vars={[
+  { name: "GEMINI_API_KEY",       description: "API key de Google AI para el modelo Gemini y embeddings",             example: "AIzaSy..." },
+  { name: "INTERNAL_API_SECRET",  description: "Secret compartido para las llamadas backend ↔ servicio de IA",       example: "helpdesk_internal_secret_dev_256bit" },
+  { name: "BACKEND_URL",          description: "URL base del backend NestJS",                                         example: "http://localhost:3001" },
+]} />
+
+---
+
+## Cómo ejecutar localmente
+
+```bash
+cd helpdesk-ai-service
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env   # completar GEMINI_API_KEY
+uvicorn app.main:app --reload --port 8000
+```
+
+El servicio arranca en `http://localhost:8000`. Documentación Swagger disponible en `/docs`.
+
+<Callout type="tip">
+  ChromaDB persiste su vector store en `./chroma_data/` por defecto. Si reseteás la base de datos y querés un estado RAG limpio, eliminá esta carpeta antes de reiniciar el servicio.
+</Callout>

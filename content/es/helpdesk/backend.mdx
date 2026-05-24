@@ -1,0 +1,222 @@
+---
+title: Backend
+description: API NestJS — motor multi-tenant con autenticación JWT, WebSockets, cliente de IA y PostgreSQL vía TypeORM.
+---
+
+import MermaidDiagram from "@/components/MermaidDiagram";
+import { TechStack, FileTable, EnvTable, Callout } from "@/components/mdx/components";
+
+# Backend
+
+El Backend es el hub central del sistema Helpdesk. Orquesta la autenticación de usuarios, el ciclo de vida de tickets, la delegación a la IA, notificaciones en tiempo real via WebSocket y el envío de emails — todo dentro de un límite multi-tenant estricto aplicado con `org_id` en cada consulta.
+
+<TechStack items={[
+  { name: "NestJS",      role: "Framework — DI, módulos, guards, decorators",                     color: "red" },
+  { name: "TypeORM",     role: "ORM con synchronize:true en dev — migra el schema automáticamente", color: "orange" },
+  { name: "PostgreSQL",  role: "Base de datos principal — todas las entidades, UUID PKs, enums",   color: "blue" },
+  { name: "Socket.IO",   role: "Servidor WebSocket — notificaciones de tickets basadas en rooms",  color: "emerald" },
+  { name: "JWT + bcrypt","role": "Auth sin estado — tokens RS256, hash de contraseñas con bcrypt", color: "amber" },
+  { name: "Resend",      role: "Emails transaccionales — notificaciones de asignación y resolución", color: "violet" },
+  { name: "Node 20",     role: "Runtime",                                                          color: "green" },
+]} />
+
+---
+
+## Arquitectura de módulos
+
+NestJS organiza la app en módulos por feature. Cada módulo es dueño de sus entidades, servicios y controllers. El `AppModule` raíz los conecta mediante `TypeOrmModule.forRootAsync`.
+
+<MermaidDiagram
+  chart={`graph TD
+    AM[AppModule] --> Auth
+    AM --> Tickets
+    AM --> Technicians
+    AM --> Levels
+    AM --> Users
+    AM --> Organizations
+    AM --> Invitations
+    AM --> Routing
+    AM --> AiClient[AI Client]
+    AM --> SuperAdmin
+    AM --> Email
+
+    Tickets --> AiClient
+    Tickets --> Technicians
+    Tickets --> Gateway[TicketsGateway<br/>WebSocket]
+    Tickets --> Email
+    Tickets --> Users
+
+    Auth --> Technicians
+    Auth --> Users
+    Auth --> Organizations
+    Auth --> Invitations
+
+    Routing --> Levels
+    Routing --> Technicians
+    Routing --> Organizations`}
+  caption="Grafo de dependencias — Tickets es el módulo con más conexiones"
+/>
+
+---
+
+## Ciclo de vida del ticket
+
+Cada ticket sigue una máquina de estados determinista. El procesamiento por IA ocurre de forma **asíncrona** — el cliente recibe un `201` inmediatamente y las actualizaciones llegan via WebSocket.
+
+<MermaidDiagram
+  chart={`sequenceDiagram
+    participant C as Cliente (browser)
+    participant B as Backend
+    participant AI as Servicio de IA
+    participant WS as WebSocket
+
+    C->>B: POST /api/tickets { asunto, descripcion }
+    B->>B: Crear ticket → estado: PENDIENTE_IA
+    B-->>C: 201 { ticket_id, status: "PENDIENTE_IA" }
+
+    B->>AI: POST /api/v1/tickets/analyze { ticket_id, asunto, descripcion, org_id }
+    AI-->>B: { category, priority, suggested_level, assigned_tecnico_id, reasoning }
+
+    B->>B: applyAiDecision() → estado: ASIGNADO
+    B->>B: incrementCarga(tecnico)
+    B->>WS: emitTicketUpdated() → rooms tech:id + user:id
+    B->>Email: sendTicketAssigned(tech)
+
+    WS-->>C: ticket:status_changed { status: "ASIGNADO", priority, reasoning }
+    WS-->>Tech[Browser del técnico]: ticket:assigned_to_you`}
+  caption="Flujo asíncrono — el cliente recibe 201 primero, luego la actualización en tiempo real"
+/>
+
+<Callout type="info">
+  `processWithAi()` se llama con `.catch()` para que un error de la IA no rompa la request. El ticket queda en `PENDIENTE_IA` y puede reintentarse manualmente.
+</Callout>
+
+---
+
+## Autenticación y roles
+
+Tres tipos de entidades pueden autenticarse: **técnicos**, **usuarios** (clientes) y **super-admins** (tabla separada). El payload del JWT codifica `role`, `entity_type` y `org_id` para que cada guard downstream tenga contexto completo sin consultar la BD.
+
+```typescript
+// Shape del JWT — embebido en cada request vía JwtStrategy
+{
+  sub: "uuid",
+  email: "ana@acme.com",
+  role: "admin",           // "admin" | "technician" | "user"
+  entity_type: "technician",
+  org_id: "org-uuid",
+  nombre: "Ana R."
+}
+```
+
+**Matriz de roles:**
+
+| Rol | Puede hacer |
+|---|---|
+| `user` | Crear tickets, ver sus propios tickets |
+| `technician` | Ver tickets asignados, marcar resuelto |
+| `admin` | Todo lo anterior + gestionar técnicos, niveles, usuarios, ver métricas |
+| `super-admin` | Crear orgs, crear admins (JWT separado, guard separado) |
+
+### Registro con token de invitación
+
+Los usuarios solo pueden registrarse mediante un link de invitación. El token se valida, la invitación se marca como usada y el `org_id` se extrae del registro de la invitación, garantizando que el nuevo usuario quede en la organización correcta.
+
+```typescript
+// auth.service.ts — register()
+if (dto.invite_token) {
+  const invite = await this.invitationsService.validate(dto.invite_token);
+  org_id = invite.org_id;          // la org viene de la invitación
+  await this.invitationsService.markUsed(dto.invite_token);
+}
+```
+
+---
+
+## Multi-tenancy
+
+Cada entidad que pertenece a una organización tiene una columna `org_id`. Los guards no filtran por org — lo hace la capa de servicio, usando el `org_id` del JWT.
+
+```typescript
+// Ejemplo: tickets filtrados por la org del usuario
+findAll(org_id?: string | null) {
+  return this.repo.find({ where: { org_id }, order: { created_at: 'DESC' } });
+}
+```
+
+El endpoint de contexto de routing (`GET /api/internal/routing-context?org_id=`) filtra niveles y técnicos por `org_id` antes de enviarlos al servicio de IA, evitando asignaciones cross-tenant.
+
+---
+
+## Gateway WebSocket
+
+`TicketsGateway` usa rooms de Socket.IO para entrega dirigida. Al conectarse, cada cliente se une a su room personal (`tech:uuid` o `user:uuid`) mediante query params del handshake.
+
+```typescript
+// tickets.gateway.ts
+handleConnection(client: Socket) {
+  const technicianId = client.handshake.query.technicianId as string;
+  const userId       = client.handshake.query.userId as string;
+
+  if (technicianId) client.join(`tech:${technicianId}`);
+  else if (userId)  client.join(`user:${userId}`);
+}
+
+emitTicketUpdated(payload: TicketUpdatedPayload): void {
+  this.server.to(`tech:${payload.assignedTechnicianId}`).emit('ticket:assigned_to_you', payload);
+  this.server.to(`user:${payload.createdByUserId}`).emit('ticket:status_changed', payload);
+}
+```
+
+El servidor WebSocket está montado en el namespace `/tickets` (`ws://host/tickets`).
+
+---
+
+## Archivos clave
+
+<FileTable files={[
+  { path: "src/app.module.ts",                              description: "Módulo raíz — configuración TypeORM, importación de todos los módulos feature" },
+  { path: "src/main.ts",                                    description: "Bootstrap: CORS, prefijo global /api, puerto 3001" },
+  { path: "src/tickets/tickets.service.ts",                 description: "create(), applyAiDecision(), markResolved(), getMetrics() — lógica de negocio principal" },
+  { path: "src/tickets/tickets.gateway.ts",                 description: "Gateway WebSocket Socket.IO — join de room al conectar, emitTicketUpdated()" },
+  { path: "src/tickets/tickets.controller.ts",              description: "Endpoints REST — POST /, GET admin/metrics (antes que GET :id para evitar conflicto)" },
+  { path: "src/auth/auth.service.ts",                       description: "login() — busca en técnicos luego usuarios; register() — valida token de invitación" },
+  { path: "src/routing/routing.service.ts",                 description: "getRoutingContext() — filtra niveles + técnicos por org_id, incluye org_context" },
+  { path: "src/ai-client/ai-client.service.ts",             description: "analyzeTicket() — HTTP POST al servicio de IA con header X-Internal-Secret" },
+  { path: "src/invitations/invitations.service.ts",         description: "create(), validate(), markUsed(), resend() — ciclo de vida de invitaciones" },
+  { path: "src/super-admin/super-admin.service.ts",         description: "createOrganization(), createAdmin() — onboarding de la plataforma" },
+  { path: "src/email/email.service.ts",                     description: "sendTicketAssigned(), sendTicketResolved(), sendInvitation() vía SDK de Resend" },
+  { path: "src/common/guards/internal-secret.guard.ts",     description: "Protege /api/internal/* — verifica header X-Internal-Secret" },
+  { path: "src/seed/seed.ts",                               description: "Crea el super-admin si no existe — ejecutar una vez tras un DB limpio" },
+]} />
+
+---
+
+## Variables de entorno
+
+<EnvTable vars={[
+  { name: "DATABASE_URL",        description: "String de conexión PostgreSQL",                                   example: "postgresql://postgres:password@localhost:5432/helpdesk" },
+  { name: "JWT_SECRET",          description: "Secret para firmar los access tokens",                            example: "super_secret_jwt_key_256bit" },
+  { name: "INTERNAL_API_SECRET", description: "Secret compartido para llamadas servicio de IA ↔ backend",       example: "helpdesk_internal_secret_dev_256bit" },
+  { name: "AI_SERVICE_URL",      description: "URL base del servicio de IA FastAPI",                            example: "http://localhost:8000" },
+  { name: "RESEND_API_KEY",      description: "API key de Resend para emails transaccionales",                  example: "re_..." },
+  { name: "FRONTEND_URL",        description: "Usado en los links de las invitaciones por email",               example: "http://localhost:3000" },
+]} />
+
+---
+
+## Cómo ejecutar localmente
+
+```bash
+cd helpdesk-backend
+npm install
+cp .env.example .env   # completar DATABASE_URL, JWT_SECRET, etc.
+npx ts-node src/seed/seed.ts   # crear superadmin (una sola vez)
+npm run start:dev
+```
+
+La API arranca en `http://localhost:3001/api`. Con `synchronize: true`, TypeORM crea todas las tablas automáticamente en el primer arranque. El servidor WebSocket está en `ws://localhost:3001/tickets`.
+
+<Callout type="warn">
+  `synchronize: true` está habilitado en desarrollo. Nunca lo habilites en producción — usá migrations. El flag está condicionado a `NODE_ENV !== 'production'` en `app.module.ts`.
+</Callout>
