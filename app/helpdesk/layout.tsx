@@ -2,6 +2,7 @@ import Link from "next/link";
 import { cookies } from "next/headers";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { SidebarNav } from "@/components/SidebarNav";
+import { MermaidRunner } from "@/components/MermaidRunner";
 
 const breadcrumb: Record<string, string> = {
   en: "Projects",
@@ -43,6 +44,7 @@ export default async function HelpdeskLayout({ children }: { children: React.Rea
         {/* Main content */}
         <main className="min-w-0 flex-1 px-8 py-10 lg:px-12">
           {children}
+          <MermaidRunner />
         </main>
       </div>
     </div>

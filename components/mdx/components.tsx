@@ -1,4 +1,4 @@
-import MermaidDiagram from "@/components/MermaidDiagram";
+import React from "react";
 
 function Callout({ type = "info", children }: { type?: "info" | "warn" | "tip"; children: React.ReactNode }) {
   const styles = {
@@ -88,6 +88,20 @@ function TechStack({ items }: { items: { name: string; role: string; color?: str
           <p className="mt-2 text-xs leading-relaxed text-zinc-400">{item.role}</p>
         </div>
       ))}
+    </div>
+  );
+}
+
+function MermaidDiagram({ chart, caption }: { chart: string; caption?: string }) {
+  return (
+    <div className="my-6">
+      <div
+        data-mermaid={chart}
+        className="overflow-x-auto rounded-xl border border-zinc-800 bg-zinc-900 p-6 text-center min-h-[80px]"
+      />
+      {caption && (
+        <p className="mt-2 text-center text-xs text-zinc-500">{caption}</p>
+      )}
     </div>
   );
 }
