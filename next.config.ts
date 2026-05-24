@@ -10,9 +10,6 @@ const withMDX = createMDX({
 
 const nextConfig: NextConfig = {
   pageExtensions: ["ts", "tsx", "mdx"],
-  outputFileTracingIncludes: {
-    "/**": ["./content/**/*"],
-  },
 };
 
 export default withMDX(nextConfig);

@@ -1,9 +1,12 @@
-import { getMdxContent } from "@/lib/mdx";
 import { cookies } from "next/headers";
 
 export default async function AiServicePage() {
-  const cookieStore = await cookies();
-  const lang = cookieStore.get("lang")?.value ?? "en";
-  const { content } = await getMdxContent("helpdesk/ai-service.mdx", lang);
-  return <article className="max-w-3xl">{content}</article>;
+  const lang = (await cookies()).get("lang")?.value ?? "en";
+
+  if (lang === "es") {
+    const { default: Content } = await import("@/content/es/helpdesk/ai-service.mdx");
+    return <article className="max-w-3xl"><Content /></article>;
+  }
+  const { default: Content } = await import("@/content/helpdesk/ai-service.mdx");
+  return <article className="max-w-3xl"><Content /></article>;
 }
