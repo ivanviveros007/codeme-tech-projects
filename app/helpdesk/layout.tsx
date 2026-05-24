@@ -1,17 +1,14 @@
 import Link from "next/link";
-import { auth } from "@/auth";
 import { cookies } from "next/headers";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
+import { SidebarNav } from "@/components/SidebarNav";
 
-const services = [
-  { slug: "ai-service", label: "AI Service", sub: "FastAPI · LangGraph · Gemini" },
-  { slug: "backend",    label: "Backend",    sub: "NestJS · TypeORM · PostgreSQL" },
-  { slug: "front",      label: "Frontend",   sub: "Next.js · TailwindCSS · Socket.IO" },
-  { slug: "landing",    label: "Landing",    sub: "Next.js · Resend · i18n" },
-];
+const breadcrumb: Record<string, string> = {
+  en: "Projects",
+  es: "Proyectos",
+};
 
 export default async function HelpdeskLayout({ children }: { children: React.ReactNode }) {
-  await auth();
   const cookieStore = await cookies();
   const lang = cookieStore.get("lang")?.value ?? "en";
 
@@ -27,7 +24,9 @@ export default async function HelpdeskLayout({ children }: { children: React.Rea
               </svg>
             </Link>
             <span className="text-xs text-zinc-600">/</span>
-            <Link href="/" className="text-xs text-zinc-500 hover:text-zinc-300 transition">Projects</Link>
+            <Link href="/" className="text-xs text-zinc-500 hover:text-zinc-300 transition">
+              {breadcrumb[lang] ?? breadcrumb.en}
+            </Link>
             <span className="text-xs text-zinc-600">/</span>
             <span className="text-xs font-medium text-zinc-300">Helpdesk AI</span>
           </div>
@@ -38,25 +37,7 @@ export default async function HelpdeskLayout({ children }: { children: React.Rea
       <div className="mx-auto flex max-w-7xl gap-0">
         {/* Sidebar */}
         <aside className="hidden w-64 shrink-0 border-r border-zinc-800 lg:block sticky top-[49px] h-[calc(100vh-49px)] overflow-y-auto">
-          <div className="px-4 py-6">
-            <p className="mb-4 px-2 text-[10px] font-semibold uppercase tracking-widest text-zinc-600">
-              Services
-            </p>
-            <nav className="flex flex-col gap-1">
-              {services.map((s) => (
-                <Link
-                  key={s.slug}
-                  href={`/helpdesk/${s.slug}`}
-                  className="group flex flex-col rounded-lg px-3 py-2.5 transition-colors hover:bg-zinc-900"
-                >
-                  <span className="text-sm font-medium text-zinc-300 group-hover:text-white transition-colors">
-                    {s.label}
-                  </span>
-                  <span className="text-xs text-zinc-600">{s.sub}</span>
-                </Link>
-              ))}
-            </nav>
-          </div>
+          <SidebarNav lang={lang} />
         </aside>
 
         {/* Main content */}
