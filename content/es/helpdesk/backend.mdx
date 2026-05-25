@@ -109,12 +109,7 @@ Tres tipos de entidades pueden autenticarse: **técnicos**, **usuarios** (client
 
 **Matriz de roles:**
 
-| Rol | Puede hacer |
-|---|---|
-| `user` | Crear tickets, ver sus propios tickets |
-| `technician` | Ver tickets asignados, marcar resuelto |
-| `admin` | Todo lo anterior + gestionar técnicos, niveles, usuarios, ver métricas |
-| `super-admin` | Crear orgs, crear admins (JWT separado, guard separado) |
+<table><thead><tr><th>Rol</th><th>Puede hacer</th></tr></thead><tbody><tr><td><code>user</code></td><td>Crear tickets, ver sus propios tickets</td></tr><tr><td><code>technician</code></td><td>Ver tickets asignados, marcar resuelto</td></tr><tr><td><code>admin</code></td><td>Todo lo anterior + gestionar técnicos, niveles, usuarios, ver métricas</td></tr><tr><td><code>super-admin</code></td><td>Crear orgs, crear admins (JWT separado, guard separado)</td></tr></tbody></table>
 
 ### Registro con token de invitación
 

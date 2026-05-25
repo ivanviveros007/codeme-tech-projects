@@ -114,16 +114,7 @@ export function useCreateTicket() {
 }
 ```
 
-| Hook | Query key | Refetch |
-|---|---|---|
-| `useMyTickets` | `["my-tickets"]` | Al hacer mutación |
-| `useAdminTickets` | `["admin-tickets"]` | Al hacer mutación |
-| `useTechnicianTickets` | `["tech-tickets"]` | Push por WebSocket |
-| `useAdminMetrics` | `["admin-metrics"]` | Intervalo de 60s |
-| `useAdminUsers` | `["admin-users"]` | Al enviar invitación |
-| `useInvitations` | `["invitations"]` | Al reenviar |
-| `useLevels` | `["levels"]` | Al crear/actualizar |
-| `useTechnicians` | `["technicians"]` | Al crear/actualizar |
+<table><thead><tr><th>Hook</th><th>Query key</th><th>Refetch</th></tr></thead><tbody><tr><td><code>useMyTickets</code></td><td><code>["my-tickets"]</code></td><td>Al hacer mutación</td></tr><tr><td><code>useAdminTickets</code></td><td><code>["admin-tickets"]</code></td><td>Al hacer mutación</td></tr><tr><td><code>useTechnicianTickets</code></td><td><code>["tech-tickets"]</code></td><td>Push por WebSocket</td></tr><tr><td><code>useAdminMetrics</code></td><td><code>["admin-metrics"]</code></td><td>Intervalo de 60s</td></tr><tr><td><code>useAdminUsers</code></td><td><code>["admin-users"]</code></td><td>Al enviar invitación</td></tr><tr><td><code>useInvitations</code></td><td><code>["invitations"]</code></td><td>Al reenviar</td></tr><tr><td><code>useLevels</code></td><td><code>["levels"]</code></td><td>Al crear/actualizar</td></tr><tr><td><code>useTechnicians</code></td><td><code>["technicians"]</code></td><td>Al crear/actualizar</td></tr></tbody></table>
 
 ---
 
@@ -164,10 +155,7 @@ export function useWebSocket<E extends WSEvent>(
 
 **Tipos de eventos** (`types/websocket-events.ts`):
 
-| Evento | Lo recibe | Payload |
-|---|---|---|
-| `ticket:assigned_to_you` | Técnico | Actualización completa del ticket |
-| `ticket:status_changed` | Cliente (creador del ticket) | Estado + razonamiento |
+<table><thead><tr><th>Evento</th><th>Lo recibe</th><th>Payload</th></tr></thead><tbody><tr><td><code>ticket:assigned_to_you</code></td><td>Técnico</td><td>Actualización completa del ticket</td></tr><tr><td><code>ticket:status_changed</code></td><td>Cliente (creador del ticket)</td><td>Estado + razonamiento</td></tr></tbody></table>
 
 Cuando llega un `ticket:status_changed`, la pantalla del cliente muestra un `TicketProcessingAlert` con el razonamiento de la IA y el técnico asignado — sin recargar la página.
 

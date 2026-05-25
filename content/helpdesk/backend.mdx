@@ -109,12 +109,7 @@ Three entity types can authenticate: **technicians**, **users** (clients), and *
 
 **Role matrix:**
 
-| Role | Can do |
-|---|---|
-| `user` | Create tickets, view own tickets |
-| `technician` | View assigned tickets, mark resolved |
-| `admin` | All of the above + manage technicians, levels, users, view metrics |
-| `super-admin` | Create orgs, create admins (separate JWT, separate guard) |
+<table><thead><tr><th>Role</th><th>Can do</th></tr></thead><tbody><tr><td><code>user</code></td><td>Create tickets, view own tickets</td></tr><tr><td><code>technician</code></td><td>View assigned tickets, mark resolved</td></tr><tr><td><code>admin</code></td><td>All of the above + manage technicians, levels, users, view metrics</td></tr><tr><td><code>super-admin</code></td><td>Create orgs, create admins (separate JWT, separate guard)</td></tr></tbody></table>
 
 ### Registration with invite token
 

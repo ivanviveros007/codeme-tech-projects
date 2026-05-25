@@ -114,16 +114,7 @@ export function useCreateTicket() {
 }
 ```
 
-| Hook | Query key | Refetch |
-|---|---|---|
-| `useMyTickets` | `["my-tickets"]` | On mutation |
-| `useAdminTickets` | `["admin-tickets"]` | On mutation |
-| `useTechnicianTickets` | `["tech-tickets"]` | WebSocket push |
-| `useAdminMetrics` | `["admin-metrics"]` | 60s interval |
-| `useAdminUsers` | `["admin-users"]` | On invite sent |
-| `useInvitations` | `["invitations"]` | On resend |
-| `useLevels` | `["levels"]` | On create/update |
-| `useTechnicians` | `["technicians"]` | On create/update |
+<table><thead><tr><th>Hook</th><th>Query key</th><th>Refetch</th></tr></thead><tbody><tr><td><code>useMyTickets</code></td><td><code>["my-tickets"]</code></td><td>On mutation</td></tr><tr><td><code>useAdminTickets</code></td><td><code>["admin-tickets"]</code></td><td>On mutation</td></tr><tr><td><code>useTechnicianTickets</code></td><td><code>["tech-tickets"]</code></td><td>WebSocket push</td></tr><tr><td><code>useAdminMetrics</code></td><td><code>["admin-metrics"]</code></td><td>60s interval</td></tr><tr><td><code>useAdminUsers</code></td><td><code>["admin-users"]</code></td><td>On invite sent</td></tr><tr><td><code>useInvitations</code></td><td><code>["invitations"]</code></td><td>On resend</td></tr><tr><td><code>useLevels</code></td><td><code>["levels"]</code></td><td>On create/update</td></tr><tr><td><code>useTechnicians</code></td><td><code>["technicians"]</code></td><td>On create/update</td></tr></tbody></table>
 
 ---
 
@@ -164,10 +155,7 @@ export function useWebSocket<E extends WSEvent>(
 
 **Event types** (`types/websocket-events.ts`):
 
-| Event | Received by | Payload |
-|---|---|---|
-| `ticket:assigned_to_you` | Technician | Full ticket update |
-| `ticket:status_changed` | Client (ticket creator) | Status + reasoning |
+<table><thead><tr><th>Event</th><th>Received by</th><th>Payload</th></tr></thead><tbody><tr><td><code>ticket:assigned_to_you</code></td><td>Technician</td><td>Full ticket update</td></tr><tr><td><code>ticket:status_changed</code></td><td>Client (ticket creator)</td><td>Status + reasoning</td></tr></tbody></table>
 
 When a `ticket:status_changed` arrives, the client screen shows a `TicketProcessingAlert` with the AI's reasoning and assigned technician name — no page refresh needed.
 
