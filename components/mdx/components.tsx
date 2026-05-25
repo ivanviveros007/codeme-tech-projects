@@ -92,22 +92,7 @@ function TechStack({ items }: { items: { name: string; role: string; color?: str
   );
 }
 
-function MermaidDiagram({ chart, caption }: { chart: string; caption?: string }) {
-  return (
-    <div className="my-6">
-      <div
-        data-mermaid={chart}
-        className="overflow-x-auto rounded-xl border border-zinc-800 bg-zinc-900 p-6 text-center min-h-[80px]"
-      />
-      {caption && (
-        <p className="mt-2 text-center text-xs text-zinc-500">{caption}</p>
-      )}
-    </div>
-  );
-}
-
 export const mdxComponents = {
-  MermaidDiagram,
   Callout,
   EnvTable,
   FileTable,

@@ -36,7 +36,7 @@ export default function MermaidDiagram({ chart, caption }: Props) {
         if (ref.current && !cancelled) {
           ref.current.innerHTML = svg;
         }
-      } catch (err) {
+      } catch {
         if (ref.current && !cancelled) {
           ref.current.innerHTML = `<p class="text-red-400 text-xs p-2">Diagram error</p>`;
         }
@@ -50,7 +50,7 @@ export default function MermaidDiagram({ chart, caption }: Props) {
     <div className="my-6">
       <div
         ref={ref}
-        className="overflow-x-auto rounded-xl border border-zinc-800 bg-zinc-900 p-6 text-center"
+        className="overflow-x-auto rounded-xl border border-zinc-800 bg-zinc-900 p-6 text-center min-h-[80px]"
       />
       {caption && (
         <p className="mt-2 text-center text-xs text-zinc-500">{caption}</p>
