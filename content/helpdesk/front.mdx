@@ -1,12 +1,12 @@
 ---
 title: Frontend
-description: Next.js 15 dashboard — three role-based portals (client, technician, admin) with React Query, WebSockets, and JWT auth.
+description: Next.js 15 dashboard — three role-based portals (client, technician, admin) with ticket lifecycle controls, file attachments, React Query, and WebSockets.
 ---
 
 
 # Frontend
 
-The Frontend is a Next.js 15 App Router application that renders three distinct experiences depending on the authenticated user's role: **clients** submit and track tickets, **technicians** manage their queue, and **admins** configure the system and view metrics. All three share a single codebase with route-based separation.
+The Frontend is a Next.js 15 App Router application that renders three distinct experiences depending on the authenticated user's role: **clients** submit tickets (with file attachments) and track their full lifecycle, **technicians** manage their queue and move tickets through states, and **admins** configure the system and view metrics. All three share a single codebase with route-based separation.
 
 <TechStack items={[
   { name: "Next.js 15",      role: "App Router — layouts, server/client components, route groups",  color: "zinc" },
@@ -91,30 +91,60 @@ Auth is **client-side only** — no server-side session cookies. The JWT is stor
 
 ---
 
+## Ticket lifecycle controls
+
+The `TicketCard` component renders contextual action buttons based on the ticket's current state and the user's role. Technicians move tickets forward; users respond when waiting.
+
+<table><thead><tr><th>Estado del ticket</th><th>Technician buttons</th><th>User buttons</th></tr></thead><tbody>
+<tr><td><code>ASIGNADO</code></td><td>Iniciar · Marcar como resuelto</td><td>Cancelar · Eliminar</td></tr>
+<tr><td><code>EN_PROGRESO</code></td><td>Esperando usuario · Marcar como resuelto</td><td>Cancelar</td></tr>
+<tr><td><code>ESPERANDO_USUARIO</code></td><td>Retomar</td><td>Ya realicé la acción · Cancelar</td></tr>
+<tr><td><code>RESUELTO</code> / <code>CANCELADO</code></td><td colspan="2">No actions — read only</td></tr>
+</tbody></table>
+
+State changes are made via `PATCH /tickets/:id/status` (technician) or `PATCH /tickets/:id/user-response` (user).
+
+---
+
+## File attachments
+
+`TicketForm` includes a drag-and-drop file zone. Files are uploaded as a separate request after ticket creation (because the ticket ID is needed as the storage path prefix).
+
+```typescript
+// NewTicketScreen.tsx — two-step submit
+createTicket(payload, {
+  onSuccess: (data) => {
+    setSubmittedTicketId(data.ticket_id);
+    if (files.length > 0) {
+      addAttachments({ ticketId: data.ticket_id, files });
+    }
+  },
+});
+```
+
+`TicketCard` renders attachments inline: images show as 80×80 thumbnails (clickable to full size), other files render as chips with the filename.
+
+Constraints enforced client-side: max 10 files, max 10 MB each, deduplication by `name + size`.
+
+---
+
 ## Data fetching — React Query hooks
 
 All server state lives in React Query. Each domain has a dedicated hook file under `src/hooks/`. The hooks use `apiClient` (Axios instance with JWT interceptor).
 
-```typescript
-// hooks/useTickets.ts — example pattern
-export function useMyTickets() {
-  return useQuery({
-    queryKey: ["my-tickets"],
-    queryFn: () => apiClient.get<Ticket[]>("/tickets/my").then(r => r.data),
-  });
-}
-
-export function useCreateTicket() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (dto: CreateTicketDto) =>
-      apiClient.post<{ ticket_id: string; status: string }>("/tickets", dto).then(r => r.data),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["my-tickets"] }),
-  });
-}
-```
-
-<table><thead><tr><th>Hook</th><th>Query key</th><th>Refetch</th></tr></thead><tbody><tr><td><code>useMyTickets</code></td><td><code>["my-tickets"]</code></td><td>On mutation</td></tr><tr><td><code>useAdminTickets</code></td><td><code>["admin-tickets"]</code></td><td>On mutation</td></tr><tr><td><code>useTechnicianTickets</code></td><td><code>["tech-tickets"]</code></td><td>WebSocket push</td></tr><tr><td><code>useAdminMetrics</code></td><td><code>["admin-metrics"]</code></td><td>60s interval</td></tr><tr><td><code>useAdminUsers</code></td><td><code>["admin-users"]</code></td><td>On invite sent</td></tr><tr><td><code>useInvitations</code></td><td><code>["invitations"]</code></td><td>On resend</td></tr><tr><td><code>useLevels</code></td><td><code>["levels"]</code></td><td>On create/update</td></tr><tr><td><code>useTechnicians</code></td><td><code>["technicians"]</code></td><td>On create/update</td></tr></tbody></table>
+<table><thead><tr><th>Hook</th><th>API call</th><th>Invalidates on success</th></tr></thead><tbody>
+<tr><td><code>useMyTickets</code></td><td><code>GET /tickets/my-tickets</code></td><td>–</td></tr>
+<tr><td><code>useAdminTickets</code></td><td><code>GET /tickets/admin</code></td><td>–</td></tr>
+<tr><td><code>useTechnicianTickets</code></td><td><code>GET /tickets/technician/:id</code></td><td>WebSocket push</td></tr>
+<tr><td><code>useCreateTicket</code></td><td><code>POST /tickets</code></td><td><code>["tickets","my"]</code></td></tr>
+<tr><td><code>useAddAttachments</code></td><td><code>POST /tickets/:id/attachments</code></td><td>–</td></tr>
+<tr><td><code>useUpdateTicketStatus</code></td><td><code>PATCH /tickets/:id/status</code></td><td><code>["tickets"]</code></td></tr>
+<tr><td><code>useUserResponseTicket</code></td><td><code>PATCH /tickets/:id/user-response</code></td><td><code>["tickets","my"]</code></td></tr>
+<tr><td><code>useResolveTicket</code></td><td><code>PATCH /tickets/:id/resolve</code></td><td><code>["tickets"]</code></td></tr>
+<tr><td><code>useCancelTicket</code></td><td><code>PATCH /tickets/:id/cancel</code></td><td><code>["tickets","my"]</code></td></tr>
+<tr><td><code>useDeleteTicket</code></td><td><code>DELETE /tickets/:id</code></td><td><code>["tickets","my"]</code></td></tr>
+<tr><td><code>useAdminMetrics</code></td><td><code>GET /tickets/admin/metrics</code></td><td>60s interval</td></tr>
+</tbody></table>
 
 ---
 
@@ -136,45 +166,20 @@ export function getSocket(options: SocketOptions = {}): Socket {
 }
 ```
 
-The `useWebSocket` hook wraps this in a React `useEffect` with cleanup:
-
-```typescript
-// hooks/useWebSocket.ts
-export function useWebSocket<E extends WSEvent>(
-  event: E,
-  handler: (payload: WSEventMap[E]) => void,
-  options: WebSocketOptions
-): void {
-  useEffect(() => {
-    const socket = getSocket(options);
-    socket.on(event, handler);
-    return () => socket.off(event, handler);
-  }, [event, options.technicianId, options.userId]);
-}
-```
-
 **Event types** (`types/websocket-events.ts`):
 
-<table><thead><tr><th>Event</th><th>Received by</th><th>Payload</th></tr></thead><tbody><tr><td><code>ticket:assigned_to_you</code></td><td>Technician</td><td>Full ticket update</td></tr><tr><td><code>ticket:status_changed</code></td><td>Client (ticket creator)</td><td>Status + reasoning</td></tr></tbody></table>
+<table><thead><tr><th>Event</th><th>Received by</th><th>Trigger</th></tr></thead><tbody>
+<tr><td><code>ticket:assigned_to_you</code></td><td>Technician</td><td>AI assigns ticket → technician room</td></tr>
+<tr><td><code>ticket:status_changed</code></td><td>Client (ticket creator)</td><td>Any status change → user room</td></tr>
+</tbody></table>
 
-When a `ticket:status_changed` arrives, the client screen shows a `TicketProcessingAlert` with the AI's reasoning and assigned technician name — no page refresh needed.
+When `ticket:status_changed` arrives on the New Ticket screen, `TicketProcessingAlert` shows the AI's reasoning and assigned technician name — no page refresh needed.
 
 ---
 
 ## Admin metrics screen
 
 `AdminMetricsScreen` fetches `GET /tickets/admin/metrics` every 60 seconds and renders 4 summary cards + visualizations.
-
-```typescript
-// hooks/useAdminMetrics.ts
-export function useAdminMetrics() {
-  return useQuery({
-    queryKey: ["admin-metrics"],
-    queryFn: () => apiClient.get<AdminMetrics>("/tickets/admin/metrics").then(r => r.data),
-    refetchInterval: 60_000,
-  });
-}
-```
 
 The technician load table uses a semaphore badge system:
 - **Green** — `carga_actual` 0–2 (available)
@@ -186,19 +191,23 @@ The technician load table uses a semaphore badge system:
 ## Key files
 
 <FileTable files={[
-  { path: "src/app/(dashboard)/layout.tsx",            description: "Dashboard shell — Sidebar + Header, reads AuthContext to check auth" },
-  { path: "src/context/AuthContext.tsx",               description: "login(), register(), logout() — JWT storage + role-based redirect" },
-  { path: "src/lib/api-client.ts",                     description: "Axios instance — baseURL, JWT interceptor, global 401 handler" },
-  { path: "src/lib/websocket-client.ts",               description: "Singleton Socket.IO client — connects to /tickets namespace" },
-  { path: "src/hooks/useWebSocket.ts",                 description: "Generic typed hook — subscribe to any WSEventMap event with cleanup" },
-  { path: "src/hooks/useTickets.ts",                   description: "useMyTickets, useAdminTickets, useCreateTicket, useMarkResolved" },
-  { path: "src/hooks/useAdminMetrics.ts",              description: "Polls GET /tickets/admin/metrics every 60s" },
-  { path: "src/hooks/useInvitations.ts",               description: "useInvitations, useSendInvitation, useResendInvitation" },
-  { path: "src/screens/AdminMetricsScreen.tsx",        description: "4 KPI cards + status breakdown + technician load table" },
-  { path: "src/screens/AdminUsersScreen.tsx",          description: "Two tables: pending invitations (with Reenviar) + registered clients" },
-  { path: "src/screens/TechnicianDashboardScreen.tsx", description: "Technician queue — subscribes to ticket:assigned_to_you WebSocket event" },
-  { path: "src/types/websocket-events.ts",             description: "WSEventMap type — maps event names to payload shapes" },
-  { path: "src/components/layout/Sidebar.tsx",         description: "Role-aware nav — different links for user / technician / admin" },
+  { path: "src/app/(dashboard)/layout.tsx",             description: "Dashboard shell — Sidebar + Header, reads AuthContext to check auth" },
+  { path: "src/context/AuthContext.tsx",                description: "login(), register(), logout() — JWT storage + role-based redirect" },
+  { path: "src/lib/api-client.ts",                      description: "Axios instance — baseURL, JWT interceptor, global 401 handler" },
+  { path: "src/lib/websocket-client.ts",                description: "Singleton Socket.IO client — connects to /tickets namespace" },
+  { path: "src/hooks/useWebSocket.ts",                  description: "Generic typed hook — subscribe to any WSEventMap event with cleanup" },
+  { path: "src/hooks/useTickets.ts",                    description: "All ticket mutations: useCreateTicket, useAddAttachments, useUpdateTicketStatus, useUserResponseTicket, useResolveTicket, useCancelTicket, useDeleteTicket" },
+  { path: "src/types/ticket.ts",                        description: "TicketStatus type (6 states), Ticket, TicketAttachment, CreateTicketPayload interfaces" },
+  { path: "src/components/tickets/TicketCard.tsx",      description: "Renders ticket with contextual action buttons — state-aware for both technician and user roles" },
+  { path: "src/components/tickets/TicketForm.tsx",      description: "New ticket form with drag-and-drop file zone — max 10 files, 10MB each, dedup by name+size" },
+  { path: "src/components/tickets/TicketStatusBadge.tsx",description: "Badge per status: yellow=PENDIENTE_IA, blue=ASIGNADO, orange=EN_PROGRESO, purple=ESPERANDO_USUARIO, green=RESUELTO, grey=CANCELADO" },
+  { path: "src/screens/NewTicketScreen.tsx",            description: "Shows TicketForm before submit; switches to success state (TicketProcessingAlert + buttons) after submission" },
+  { path: "src/screens/ClientDashboardScreen.tsx",      description: "Sections: Open / Resolved / Cancelled — cancel, delete, and user-response actions wired up" },
+  { path: "src/screens/TechnicianDashboardScreen.tsx",  description: "Technician queue — onResolve + onStatusChange (Iniciar / Esperando usuario / Retomar) wired to hooks" },
+  { path: "src/screens/AdminMetricsScreen.tsx",         description: "4 KPI cards + status breakdown + technician load table" },
+  { path: "src/screens/AdminUsersScreen.tsx",           description: "4-col table: EMAIL / STATUS / EXPIRY / ACTIONS — Copy+Resend for pending, Delete for all" },
+  { path: "src/components/layout/UserGreeting.tsx",     description: "¡Hola, [name]! greeting + role badge in dashboard (user / technician+level / admin)" },
+  { path: "src/components/layout/Sidebar.tsx",          description: "Role-aware nav — different links for user / technician / admin" },
 ]} />
 
 ---

@@ -1,21 +1,23 @@
 ---
 title: Backend
-description: NestJS API — multi-tenant helpdesk engine with JWT auth, WebSockets, AI client, and PostgreSQL via TypeORM.
+description: NestJS API — multi-tenant helpdesk engine with JWT auth, WebSockets, AI client, file uploads, and scheduled inactivity alerts.
 ---
 
 
 # Backend
 
-The Backend is the central hub of the Helpdesk system. It orchestrates user authentication, ticket lifecycle, AI delegation, WebSocket notifications, and email delivery — all within a strict multi-tenant boundary enforced by `org_id` on every query.
+The Backend is the central hub of the Helpdesk system. It orchestrates user authentication, ticket lifecycle (including intermediate states and inactivity alerts), AI delegation, file storage, WebSocket notifications, and email delivery — all within a strict multi-tenant boundary enforced by `org_id` on every query.
 
 <TechStack items={[
-  { name: "NestJS",      role: "Framework — DI, modules, guards, decorators",                    color: "red" },
-  { name: "TypeORM",     role: "ORM with synchronize:true in dev — auto-migrates schema",        color: "orange" },
-  { name: "PostgreSQL",  role: "Primary database — all entities, UUID PKs, enum columns",        color: "blue" },
-  { name: "Socket.IO",   role: "WebSocket server — room-based real-time ticket notifications",   color: "emerald" },
-  { name: "JWT + bcrypt","role": "Stateless auth — RS256 tokens, bcrypt password hashing",       color: "amber" },
-  { name: "Resend",      role: "Transactional emails — assignment + resolution notifications",   color: "violet" },
-  { name: "Node 20",     role: "Runtime",                                                        color: "green" },
+  { name: "NestJS",           role: "Framework — DI, modules, guards, decorators",                    color: "red" },
+  { name: "TypeORM",          role: "ORM with synchronize:true in dev — auto-migrates schema",        color: "orange" },
+  { name: "PostgreSQL",       role: "Primary database — all entities, UUID PKs, enum columns",        color: "blue" },
+  { name: "Socket.IO",        role: "WebSocket server — room-based real-time ticket notifications",   color: "emerald" },
+  { name: "JWT + bcrypt",     "role": "Stateless auth — RS256 tokens, bcrypt password hashing",       color: "amber" },
+  { name: "Resend",           role: "Transactional emails — assignment, resolution, inactivity alerts",color: "violet" },
+  { name: "AWS SDK (R2)",     role: "Cloudflare R2 file storage — ticket attachments via S3 API",     color: "orange" },
+  { name: "@nestjs/schedule", role: "Cron jobs — hourly inactivity check for stalled tickets",        color: "cyan" },
+  { name: "Node 20",          role: "Runtime",                                                        color: "green" },
 ]} />
 
 ---
@@ -26,7 +28,8 @@ NestJS organizes the app into feature modules. Each module owns its entities, se
 
 <MermaidDiagram
   chart={`graph TD
-    AM[AppModule] --> Auth
+    AM[AppModule] --> Schedule[ScheduleModule]
+    AM --> Auth
     AM --> Tickets
     AM --> Technicians
     AM --> Levels
@@ -37,12 +40,15 @@ NestJS organizes the app into feature modules. Each module owns its entities, se
     AM --> AiClient[AI Client]
     AM --> SuperAdmin
     AM --> Email
+    AM --> Uploads
 
     Tickets --> AiClient
     Tickets --> Technicians
     Tickets --> Gateway[TicketsGateway<br/>WebSocket]
     Tickets --> Email
     Tickets --> Users
+    Tickets --> Uploads
+    Tickets --> Cron[TicketsCron<br/>48h alerts]
 
     Auth --> Technicians
     Auth --> Users
@@ -59,35 +65,70 @@ NestJS organizes the app into feature modules. Each module owns its entities, se
 
 ## Ticket lifecycle
 
-Every ticket goes through a deterministic state machine. The AI processing happens **asynchronously** — the client gets a `201` immediately and the ticket updates arrive via WebSocket.
+Every ticket follows a deterministic state machine. The AI processing happens **asynchronously** — the client gets a `201` immediately and the ticket updates arrive via WebSocket.
 
 <MermaidDiagram
-  chart={`sequenceDiagram
-    participant C as Client (browser)
-    participant B as Backend
-    participant AI as AI Service
-    participant WS as WebSocket
-
-    C->>B: POST /api/tickets { asunto, descripcion }
-    B->>B: Create ticket → estado: PENDIENTE_IA
-    B-->>C: 201 { ticket_id, status: "PENDIENTE_IA" }
-
-    B->>AI: POST /api/v1/tickets/analyze { ticket_id, asunto, descripcion, org_id }
-    AI-->>B: { category, priority, suggested_level, assigned_tecnico_id, reasoning }
-
-    B->>B: applyAiDecision() → estado: ASIGNADO
-    B->>B: incrementCarga(tecnico)
-    B->>WS: emitTicketUpdated() → rooms tech:id + user:id
-    B->>Email: sendTicketAssigned(tech)
-
-    WS-->>C: ticket:status_changed { status: "ASIGNADO", priority, reasoning }
-    WS-->>Tech[Technician browser]: ticket:assigned_to_you`}
-  caption="Async ticket flow — client gets 201 first, then real-time update via WebSocket"
+  chart={`stateDiagram-v2
+    [*] --> PENDIENTE_IA : ticket created
+    PENDIENTE_IA --> ASIGNADO : AI decision applied
+    ASIGNADO --> EN_PROGRESO : technician starts work
+    EN_PROGRESO --> ESPERANDO_USUARIO : technician needs user action
+    ESPERANDO_USUARIO --> EN_PROGRESO : user responds
+    EN_PROGRESO --> RESUELTO : technician resolves
+    ASIGNADO --> RESUELTO : technician resolves directly
+    ASIGNADO --> CANCELADO : user cancels
+    EN_PROGRESO --> CANCELADO : user cancels
+    ESPERANDO_USUARIO --> CANCELADO : user cancels
+    RESUELTO --> [*]
+    CANCELADO --> [*]`}
+  caption="Full ticket state machine — 6 states, bidirectional between EN_PROGRESO and ESPERANDO_USUARIO"
 />
 
-<Callout type="info">
-  `processWithAi()` is called with `.catch()` so a failing AI call doesn't crash the request. The ticket stays in `PENDIENTE_IA` and can be retried manually.
-</Callout>
+### Inactivity cron (48h alerts)
+
+`TicketsCron` runs every hour via `@nestjs/schedule`. It detects two stale patterns and emails the relevant party:
+
+<table><thead><tr><th>Condition</th><th>Action</th></tr></thead><tbody>
+<tr><td>Ticket in <code>ESPERANDO_USUARIO</code> for more than 48h</td><td>Email sent to the ticket's creator reminding them to respond</td></tr>
+<tr><td>Ticket in <code>ASIGNADO</code> for more than 48h</td><td>Email sent to the assigned technician alerting them it hasn't been started</td></tr>
+</tbody></table>
+
+```typescript
+// tickets.cron.ts
+@Cron(CronExpression.EVERY_HOUR)
+async checkInactiveTickets() {
+  const cutoff = new Date(Date.now() - 48 * 60 * 60 * 1000);
+  // ESPERANDO_USUARIO tickets stale > 48h → email user
+  // ASIGNADO tickets stale > 48h → email technician
+}
+```
+
+---
+
+## File attachments (Cloudflare R2)
+
+`UploadsService` wraps the AWS SDK S3 client pointing at Cloudflare R2. Files are stored at `tickets/{ticketId}/{uuid}.{ext}` and publicly accessible via the R2 public URL.
+
+```typescript
+// uploads.service.ts
+async uploadFile(file: Express.Multer.File, folder: string) {
+  const key = `${folder}/${uuidv4()}${ext}`;
+  await this.s3.send(new PutObjectCommand({ Bucket, Key: key, Body: file.buffer, ContentType: file.mimetype }));
+  return { key, url: `${this.publicUrl}/${key}` };
+}
+```
+
+The `POST /tickets/:id/attachments` endpoint accepts up to 10 files (max 10 MB each) via `multipart/form-data` using Multer's `memoryStorage`. Files are streamed directly to R2 — nothing is written to disk.
+
+When a ticket is deleted, all its R2 files are deleted first:
+
+```typescript
+// tickets.service.ts — deleteTicket()
+for (const att of ticket.attachments) {
+  await this.uploadsService.deleteFile(att.key).catch(() => null);
+}
+await this.repo.delete(id);
+```
 
 ---
 
@@ -109,7 +150,12 @@ Three entity types can authenticate: **technicians**, **users** (clients), and *
 
 **Role matrix:**
 
-<table><thead><tr><th>Role</th><th>Can do</th></tr></thead><tbody><tr><td><code>user</code></td><td>Create tickets, view own tickets</td></tr><tr><td><code>technician</code></td><td>View assigned tickets, mark resolved</td></tr><tr><td><code>admin</code></td><td>All of the above + manage technicians, levels, users, view metrics</td></tr><tr><td><code>super-admin</code></td><td>Create orgs, create admins (separate JWT, separate guard)</td></tr></tbody></table>
+<table><thead><tr><th>Role</th><th>Can do</th></tr></thead><tbody>
+<tr><td><code>user</code></td><td>Create tickets (with attachments), view own tickets, cancel/delete own non-resolved tickets, respond when ticket is in <code>ESPERANDO_USUARIO</code></td></tr>
+<tr><td><code>technician</code></td><td>View assigned tickets, change state (ASIGNADO→EN_PROGRESO→ESPERANDO_USUARIO→RESUELTO), mark resolved</td></tr>
+<tr><td><code>admin</code></td><td>All of the above + manage technicians, levels, users, view metrics</td></tr>
+<tr><td><code>super-admin</code></td><td>Create orgs, create admins, edit technician/admin data (separate JWT, separate guard)</td></tr>
+</tbody></table>
 
 ### Registration with invite token
 
@@ -119,7 +165,7 @@ Users can only register via an invitation link. The token is validated, the invi
 // auth.service.ts — register()
 if (dto.invite_token) {
   const invite = await this.invitationsService.validate(dto.invite_token);
-  org_id = invite.org_id;          // org comes from the invite
+  org_id = invite.org_id;
   await this.invitationsService.markUsed(dto.invite_token);
 }
 ```
@@ -137,7 +183,7 @@ findAll(org_id?: string | null) {
 }
 ```
 
-The routing context endpoint (`GET /api/internal/routing-context?org_id=`) filters levels and technicians by `org_id` before sending to the AI service. This prevents cross-tenant technician assignments.
+The routing context endpoint (`GET /api/internal/routing-context?org_id=`) filters levels and technicians by `org_id` **and** returns `org_context` (company type + custom AI instructions) before sending to the AI service. This prevents cross-tenant assignments and enables per-client AI behavior.
 
 ---
 
@@ -154,34 +200,31 @@ handleConnection(client: Socket) {
   if (technicianId) client.join(`tech:${technicianId}`);
   else if (userId)  client.join(`user:${userId}`);
 }
-
-emitTicketUpdated(payload: TicketUpdatedPayload): void {
-  this.server.to(`tech:${payload.assignedTechnicianId}`).emit('ticket:assigned_to_you', payload);
-  this.server.to(`user:${payload.createdByUserId}`).emit('ticket:status_changed', payload);
-}
 ```
 
-The WebSocket server is mounted on the `/tickets` namespace (`ws://host/tickets`). CORS is open (`cb(null, true)`) to allow any origin during development.
+The WebSocket server is mounted on the `/tickets` namespace (`ws://host/tickets`).
 
 ---
 
 ## Key files
 
 <FileTable files={[
-  { path: "src/app.module.ts",                              description: "Root module — TypeORM config, all feature module imports" },
-  { path: "src/main.ts",                                    description: "Bootstrap: CORS, global prefix /api, port 3001" },
-  { path: "src/tickets/tickets.service.ts",                 description: "create(), applyAiDecision(), markResolved(), getMetrics() — core business logic" },
-  { path: "src/tickets/tickets.gateway.ts",                 description: "Socket.IO WebSocket gateway — room join on connect, emitTicketUpdated()" },
-  { path: "src/tickets/tickets.controller.ts",              description: "REST endpoints — POST /, GET admin/metrics (before GET :id to avoid conflict)" },
-  { path: "src/auth/auth.service.ts",                       description: "login() — checks technicians then users table; register() — validates invite token" },
-  { path: "src/auth/strategies/jwt.strategy.ts",            description: "Validates Bearer token, attaches decoded payload to req.user" },
-  { path: "src/routing/routing.service.ts",                 description: "getRoutingContext() — filters levels + technicians by org_id, includes org_context" },
-  { path: "src/ai-client/ai-client.service.ts",             description: "analyzeTicket() — HTTP POST to AI service with X-Internal-Secret header" },
-  { path: "src/invitations/invitations.service.ts",         description: "create(), validate(), markUsed(), resend() — invitation lifecycle" },
-  { path: "src/super-admin/super-admin.service.ts",         description: "createOrganization(), createAdmin() — platform onboarding" },
-  { path: "src/email/email.service.ts",                     description: "sendTicketAssigned(), sendTicketResolved(), sendInvitation() via Resend SDK" },
-  { path: "src/common/guards/internal-secret.guard.ts",     description: "Guards /api/internal/* — checks X-Internal-Secret header" },
-  { path: "src/seed/seed.ts",                               description: "Creates super-admin if it doesn't exist — run once after fresh DB" },
+  { path: "src/app.module.ts",                                  description: "Root module — TypeORM config, ScheduleModule.forRoot(), all feature module imports" },
+  { path: "src/main.ts",                                        description: "Bootstrap: CORS, global prefix /api, port 3001" },
+  { path: "src/tickets/tickets.service.ts",                     description: "create(), applyAiDecision(), updateStatus(), userResponded(), markResolved(), addAttachments(), getMetrics()" },
+  { path: "src/tickets/tickets.controller.ts",                  description: "REST: POST /, PATCH :id/status (technician), PATCH :id/user-response (user), POST :id/attachments, DELETE :id" },
+  { path: "src/tickets/tickets.cron.ts",                        description: "Hourly @Cron — emails stalled ESPERANDO_USUARIO (>48h) and ASIGNADO (>48h) tickets" },
+  { path: "src/tickets/entities/ticket.entity.ts",              description: "TicketStatus enum (6 states), Ticket entity with last_activity_at, OneToMany attachments" },
+  { path: "src/tickets/entities/ticket-attachment.entity.ts",   description: "TicketAttachment entity — filename, url, key (R2 path), mimetype, size" },
+  { path: "src/tickets/tickets.gateway.ts",                     description: "Socket.IO WebSocket gateway — room join on connect, emitTicketUpdated()" },
+  { path: "src/uploads/uploads.service.ts",                     description: "uploadFile() and deleteFile() via AWS SDK S3 client pointing at Cloudflare R2" },
+  { path: "src/auth/auth.service.ts",                           description: "login() — checks technicians then users table; register() — validates invite token" },
+  { path: "src/routing/routing.service.ts",                     description: "getRoutingContext() — filters levels + technicians by org_id, includes org_context (company_type, custom_instructions)" },
+  { path: "src/ai-client/ai-client.service.ts",                 description: "analyzeTicket() — HTTP POST to AI service with org_id and X-Internal-Secret header" },
+  { path: "src/invitations/invitations.service.ts",             description: "create(), validate(), markUsed(), resend() — invitation lifecycle" },
+  { path: "src/email/email.service.ts",                         description: "sendTicketAssigned(), sendTicketResolved(), sendTicketAssignedToUser(), sendInvitation(), sendInactivityAlert()" },
+  { path: "src/common/guards/internal-secret.guard.ts",         description: "Guards /api/internal/* — checks X-Internal-Secret header" },
+  { path: "src/seed/seed.ts",                                   description: "Creates super-admin if it doesn't exist — run once after fresh DB" },
 ]} />
 
 ---
@@ -189,12 +232,17 @@ The WebSocket server is mounted on the `/tickets` namespace (`ws://host/tickets`
 ## Environment variables
 
 <EnvTable vars={[
-  { name: "DATABASE_URL",        description: "PostgreSQL connection string",                              example: "postgresql://postgres:password@localhost:5432/helpdesk" },
-  { name: "JWT_SECRET",          description: "Secret for signing access tokens",                          example: "super_secret_jwt_key_256bit" },
-  { name: "INTERNAL_API_SECRET", description: "Shared secret for AI service ↔ backend calls",             example: "helpdesk_internal_secret_dev_256bit" },
-  { name: "AI_SERVICE_URL",      description: "Base URL of the FastAPI AI service",                        example: "http://localhost:8000" },
-  { name: "RESEND_API_KEY",      description: "Resend API key for transactional emails",                   example: "re_..." },
-  { name: "FRONTEND_URL",        description: "Used in invitation email links",                            example: "http://localhost:3000" },
+  { name: "DATABASE_URL",        description: "PostgreSQL connection string",                                    example: "postgresql://postgres:password@localhost:5432/helpdesk" },
+  { name: "JWT_SECRET",          description: "Secret for signing access tokens",                               example: "super_secret_jwt_key_256bit" },
+  { name: "INTERNAL_API_SECRET", description: "Shared secret for AI service ↔ backend calls",                  example: "helpdesk_internal_secret_dev_256bit" },
+  { name: "AI_SERVICE_URL",      description: "Base URL of the FastAPI AI service",                             example: "http://localhost:8000" },
+  { name: "RESEND_API_KEY",      description: "Resend API key for transactional emails",                        example: "re_..." },
+  { name: "FRONTEND_URL",        description: "Used in invitation email links and inactivity alert CTAs",       example: "http://localhost:3000" },
+  { name: "R2_ACCOUNT_ID",       description: "Cloudflare account ID — used to build the R2 endpoint URL",     example: "d3c2167f91b2dc34..." },
+  { name: "R2_ACCESS_KEY_ID",    description: "R2 API token access key (from R2 → Manage R2 API Tokens)",      example: "16cf019acb4fc16e..." },
+  { name: "R2_SECRET_ACCESS_KEY",description: "R2 API token secret key",                                        example: "7408e4e87f5d7680..." },
+  { name: "R2_BUCKET",           description: "R2 bucket name for storing ticket attachments",                  example: "helpdesk-attachments" },
+  { name: "R2_PUBLIC_URL",       description: "Public URL of the R2 bucket for serving files",                  example: "https://pub-xxx.r2.dev" },
 ]} />
 
 ---
@@ -204,12 +252,12 @@ The WebSocket server is mounted on the `/tickets` namespace (`ws://host/tickets`
 ```bash
 cd helpdesk-backend
 npm install
-cp .env.example .env   # fill in DATABASE_URL, JWT_SECRET, etc.
+cp .env.example .env   # fill in DATABASE_URL, JWT_SECRET, R2 vars, etc.
 npx ts-node src/seed/seed.ts   # create superadmin once
 npm run start:dev
 ```
 
-The API starts at `http://localhost:3001/api`. With `synchronize: true`, TypeORM auto-creates all tables on first run. WebSocket server is at `ws://localhost:3001/tickets`.
+The API starts at `http://localhost:3001/api`. With `synchronize: true`, TypeORM auto-creates all tables on first run (including `ticket_attachments`). WebSocket server is at `ws://localhost:3001/tickets`.
 
 <Callout type="warn">
   `synchronize: true` is enabled in development. Never enable it in production — use migrations instead. The flag is gated by `NODE_ENV !== 'production'` in `app.module.ts`.
